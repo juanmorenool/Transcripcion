@@ -1,4 +1,4 @@
-```python
+
 import io
 import json
 import zipfile
@@ -416,4 +416,4 @@ st.caption(
     "MVP: Whisper local (faster-whisper) para transcripción "
     "+ matching local contra el guion."
 )
-```
+
