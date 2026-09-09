@@ -409,7 +409,51 @@ if st.session_state.matches:
         "application/zip",
     )
 
+# -----------------------------
+# Texto a voz
+# -----------------------------
+st.divider()
+st.subheader("🗣️ Texto a voz")
+st.caption("Genera audio a partir del guion (o de un texto libre) usando voces neuronales gratuitas.")
 
+from src.tts import text_to_speech, SPANISH_VOICES
+
+tts_source = st.radio(
+    "Texto a convertir",
+    ["Usar el guion cargado", "Escribir/pegar texto"],
+    horizontal=True,
+)
+
+if tts_source == "Usar el guion cargado":
+    tts_text = st.session_state.script_text
+    if not tts_text:
+        st.info("Primero cargá un guion arriba, o elegí 'Escribir/pegar texto'.")
+else:
+    tts_text = st.text_area("Texto", height=150, placeholder="Escribí o pegá el texto a narrar...")
+
+col_voice, col_rate = st.columns([2, 1])
+with col_voice:
+    voice_label = st.selectbox("Voz", list(SPANISH_VOICES.keys()))
+with col_rate:
+    rate_pct = st.slider("Velocidad", -30, 30, 0, step=5, format="%d%%")
+
+if st.button("🔊 Generar audio", type="primary", disabled=not tts_text, use_container_width=True):
+    with st.spinner("Generando audio..."):
+        try:
+            audio_bytes = text_to_speech(
+                tts_text,
+                voice=SPANISH_VOICES[voice_label],
+                rate=f"{rate_pct:+d}%",
+            )
+            st.audio(audio_bytes, format="audio/mp3")
+            st.download_button(
+                "⬇️ Descargar audio",
+                audio_bytes,
+                "narracion_generada.mp3",
+                "audio/mpeg",
+            )
+        except Exception as exc:
+            st.error(f"Error generando audio: {exc}")
 st.divider()
 
 st.caption(
