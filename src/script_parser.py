@@ -26,7 +26,12 @@ def extract_script_text(filename: str, data: bytes) -> str:
 
         reader = PdfReader(io.BytesIO(data))
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        return _clean_text(text)
+        cleaned_text = _clean_text(text)
+        if not cleaned_text.strip():
+            raise ValueError(
+                "El PDF no tiene texto extraíble (puede ser un escaneo); probá con TXT o DOCX."
+            )
+        return cleaned_text
 
     raise ValueError(f"Formato de guion no soportado: {suffix}")
 
