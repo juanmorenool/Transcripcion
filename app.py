@@ -28,7 +28,6 @@ for key, default in {
     "transcriptions": {},
     "matches": None,
     "script_text": "",
-    "script_units": [],
     "audio_files": {},
 }.items():
     if key not in st.session_state:
@@ -96,7 +95,6 @@ if script_file:
             script_file.getvalue(),
         )
         st.session_state.script_text = script_text
-        st.session_state.script_units = None
         st.success(f"Guion cargado: {len(script_text.split())} palabras.")
         with st.expander("Ver guion"):
             st.text_area(
@@ -113,14 +111,14 @@ if script_file:
 # Store uploaded audio bytes
 # -----------------------------
 if audio_files:
-    st.session_state.audio_files = {
+    st.session_state.audio_files.update({
         file_sha256(f.getvalue()): {
             "name": f.name,
             "bytes": f.getvalue(),
             "type": f.type or "audio/mpeg",
         }
         for f in audio_files
-    }
+    })
 
     st.info(f"{len(audio_files)} archivo(s) de audio cargado(s).")
 
@@ -132,16 +130,37 @@ st.divider()
 st.subheader("🎙️ Transcripción")
 
 has_key = False
+missing_key_message = (
+    "No encuentro `ELEVENLABS_API_KEY`. Debe estar en el nivel raíz de "
+    "`.streamlit/secrets.toml` (sin secciones, por ejemplo `[elevenlabs]`) "
+    "y con ese nombre exacto, sin espacios."
+)
 try:
-    has_key = bool(st.secrets.get("ELEVENLABS_API_KEY"))
+    if not st.secrets:
+        missing_key_message = (
+            "No hay secretos cargados en Streamlit. Agrega "
+            "`ELEVENLABS_API_KEY` en el nivel raíz de "
+            "`.streamlit/secrets.toml` (sin secciones y sin espacios en el nombre)."
+        )
+    elif "ELEVENLABS_API_KEY" not in st.secrets:
+        missing_key_message = (
+            "Hay secretos configurados, pero falta `ELEVENLABS_API_KEY`. "
+            "Asegúrate de definirla en el nivel raíz de "
+            "`.streamlit/secrets.toml` (sin secciones) y con ese nombre exacto."
+        )
+    else:
+        key_value = st.secrets.get("ELEVENLABS_API_KEY")
+        has_key = bool(str(key_value).strip()) if key_value is not None else False
+        if not has_key:
+            missing_key_message = (
+                "`ELEVENLABS_API_KEY` existe pero está vacía. Completa su valor "
+                "en el nivel raíz de `.streamlit/secrets.toml`."
+            )
 except Exception:
     has_key = False
 
 if not has_key:
-    st.warning(
-        "No encuentro `ELEVENLABS_API_KEY`. Configúrala en "
-        "`.streamlit/secrets.toml` antes de transcribir."
-    )
+    st.warning(missing_key_message)
 
 if st.button(
     "🚀 Transcribir audios",
