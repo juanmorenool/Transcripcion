@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import io
 from pathlib import Path
 import re
+from typing import Dict, List, Optional
 
 
 # Labels accepted by the structured-script parser. They are deliberately
@@ -66,7 +69,7 @@ def _clean_segment_text(text: str) -> str:
     return text.strip()
 
 
-def parse_structured_script(text: str) -> list[dict] | None:
+def parse_structured_script(text: str) -> Optional[List[Dict]]:
     """
     Parse a slide-structured script while preserving the exact global order.
 
@@ -86,15 +89,15 @@ def parse_structured_script(text: str) -> list[dict] | None:
     if not any(_SLIDE_RE.match(line) for line in lines):
         return None
 
-    segments: list[dict] = []
-    current_slide: int | None = None
-    pending: list[str] = []
-    pending_label: str | None = None
+    segments: List[Dict] = []
+    current_slide: Optional[int] = None
+    pending: List[str] = []
+    pending_label: Optional[str] = None
     pending_demo = False
-    demo_slide: int | None = None
-    demo_parts: list[str] = []
-    intro_counter: dict[int, int] = {}
-    demo_counter: dict[int, int] = {}
+    demo_slide: Optional[int] = None
+    demo_parts: List[str] = []
+    intro_counter: Dict[int, int] = {}
+    demo_counter: Dict[int, int] = {}
 
     def append_segment(slide: int, label: str, content: str) -> None:
         content = _clean_segment_text(content)
@@ -143,8 +146,6 @@ def parse_structured_script(text: str) -> list[dict] | None:
     for raw_line in lines:
         line = raw_line.strip()
 
-        # A new slide header closes any open segment/demo. This also makes demos
-        # without an explicit "Fin Demo/..." tolerant to the next slide header.
         if _SLIDE_RE.match(raw_line):
             if pending_demo:
                 flush_demo()
@@ -171,7 +172,6 @@ def parse_structured_script(text: str) -> list[dict] | None:
             continue
 
         if current_slide is None:
-            # Ignore title/material before the first recognized slide header.
             continue
 
         if not line:
