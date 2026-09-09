@@ -13,11 +13,7 @@ def split_into_sentences(text: str) -> list[str]:
         return []
 
     parts = re.split(r"(?<=[.!?…])\s+(?=[A-ZÁÉÍÓÚÜÑ0-9¿¡])", text)
-
-    # Si el texto no tiene suficiente puntuación, usar saltos de línea
-    # como fallback.
     parts = [p.strip() for p in parts if p.strip()]
-
     return parts
 
 
@@ -43,8 +39,6 @@ def _score(transcription: str, candidate: str) -> float:
     token_set = fuzz.token_set_ratio(a, b) / 100
     partial = fuzz.partial_ratio(a, b) / 100
 
-    # ratio/token_set tienen más peso porque queremos identificar
-    # el mismo contenido aunque existan pequeñas diferencias.
     return (
         0.35 * ratio
         + 0.25 * token_sort
@@ -55,13 +49,9 @@ def _score(transcription: str, candidate: str) -> float:
 
 def _estimate_window_size(transcription: str, sentence_count: int) -> tuple[int, int]:
     words = len(normalize(transcription).split())
-
-    # La mayoría de narraciones cortas estarán cerca de esta relación.
     estimated = max(1, round(words / 18))
-
     low = max(1, estimated - 2)
     high = min(sentence_count, estimated + 3)
-
     return low, high
 
 
@@ -88,7 +78,6 @@ def best_match(
             end = start + window
             candidate = " ".join(sentences[start:end])
             score = _score(transcription, candidate)
-
             candidates.append(
                 {
                     "start_sentence": start,
@@ -106,6 +95,7 @@ def match_audios_to_script(
     script_text: str,
     max_window: int = 8,
 ) -> list[dict]:
+    """Legacy sentence/window matcher. Kept unchanged for unstructured scripts."""
     sentences = split_into_sentences(script_text)
 
     if not sentences:
@@ -128,12 +118,59 @@ def match_audios_to_script(
             }
         )
 
-    # MVP: ordenar por posición estimada en el guion.
-    # En una siguiente versión podemos incorporar alineamiento global
-    # para resolver solapamientos o fragmentos fuera de orden.
     candidates.sort(
         key=lambda x: (
             x["start_sentence"],
+            -x["confidence"],
+            x["filename"].lower(),
+        )
+    )
+
+    for order, item in enumerate(candidates, start=1):
+        item["order"] = order
+
+    return candidates
+
+
+def match_audios_to_segments(
+    transcriptions: dict,
+    segments: list[dict],
+) -> list[dict]:
+    """
+    Match each audio against the complete text of every structured segment.
+
+    Unlike the legacy matcher, the segment is already the intended unit, so no
+    sentence windows are generated. Final ordering is based exclusively on the
+    segment's global order_index, which correctly interleaves demos/intros with
+    numbered segments.
+    """
+    if not segments:
+        raise ValueError("El guion estructurado no contiene segmentos con texto.")
+
+    candidates = []
+
+    for item in transcriptions.values():
+        best_segment = max(
+            segments,
+            key=lambda segment: _score(item["text"], segment["text"]),
+        )
+        score = _score(item["text"], best_segment["text"])
+        candidates.append(
+            {
+                "diapositiva": best_segment["diapositiva"],
+                "label": best_segment["label"],
+                "order_index": best_segment["order_index"],
+                "matched_text": best_segment["text"],
+                "confidence": score,
+                "filename": item["filename"],
+                "file_hash": item["file_hash"],
+                "transcription": item["text"],
+            }
+        )
+
+    candidates.sort(
+        key=lambda x: (
+            x["order_index"],
             -x["confidence"],
             x["filename"].lower(),
         )
