@@ -3,6 +3,22 @@ from pathlib import Path
 import re
 
 
+# Labels accepted by the structured-script parser. They are deliberately
+# tolerant to optional colons, spacing and common demo-label variants.
+_SLIDE_RE = re.compile(r"^\s*Diapositiva\s+(\d+)\s*:?[ \t]*$", re.IGNORECASE)
+_SEGMENT_RE = re.compile(
+    r"^\s*Diapo\s*(\d+)\.(\d+)\s*:\s*(.*)$", re.IGNORECASE
+)
+_DEMO_START_RE = re.compile(
+    r"^\s*(?:Inicio\s+)?Demo\s*(?:/|-)\s*Diapositiva\s*(\d+)\s*:?[ \t]*(.*)$",
+    re.IGNORECASE,
+)
+_DEMO_END_RE = re.compile(
+    r"^\s*Fin\s+Demo\s*(?:/|-)\s*Diapositiva\s*(\d+)\s*\.?\s*$",
+    re.IGNORECASE,
+)
+
+
 def extract_script_text(filename: str, data: bytes) -> str:
     suffix = Path(filename).suffix.lower()
 
@@ -41,3 +57,147 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _clean_segment_text(text: str) -> str:
+    """Normalize whitespace inside a structured segment without changing words."""
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n+", " ", text)
+    return text.strip()
+
+
+def parse_structured_script(text: str) -> list[dict] | None:
+    """
+    Parse a slide-structured script while preserving the exact global order.
+
+    A segment is created for every labeled paragraph, every unlabeled paragraph
+    inside a slide, and every demo block. Demos are not handled as a separate
+    ordering phase: they receive the next global order_index at their position.
+
+    Returns None when no "Diapositiva N" header is found, allowing the caller
+    to keep the legacy sentence/window matching path unchanged.
+    """
+    if not text or not text.strip():
+        return None
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+
+    if not any(_SLIDE_RE.match(line) for line in lines):
+        return None
+
+    segments: list[dict] = []
+    current_slide: int | None = None
+    pending: list[str] = []
+    pending_label: str | None = None
+    pending_demo = False
+    demo_slide: int | None = None
+    demo_parts: list[str] = []
+    intro_counter: dict[int, int] = {}
+    demo_counter: dict[int, int] = {}
+
+    def append_segment(slide: int, label: str, content: str) -> None:
+        content = _clean_segment_text(content)
+        if not content:
+            return
+        segments.append(
+            {
+                "diapositiva": slide,
+                "label": label,
+                "order_index": len(segments),
+                "text": content,
+            }
+        )
+
+    def flush_pending() -> None:
+        nonlocal pending, pending_label
+        if current_slide is None:
+            pending = []
+            pending_label = None
+            return
+        content = "\n".join(pending)
+        if content.strip():
+            if pending_label:
+                label = pending_label
+            else:
+                intro_counter[current_slide] = intro_counter.get(current_slide, 0) + 1
+                label = f"{current_slide}-intro-{intro_counter[current_slide]}"
+            append_segment(current_slide, label, content)
+        pending = []
+        pending_label = None
+
+    def flush_demo() -> None:
+        nonlocal demo_parts, pending_demo, demo_slide
+        if demo_slide is not None:
+            demo_counter[demo_slide] = demo_counter.get(demo_slide, 0) + 1
+            label = (
+                f"{demo_slide}-demo"
+                if demo_counter[demo_slide] == 1
+                else f"{demo_slide}-demo-{demo_counter[demo_slide]}"
+            )
+            append_segment(demo_slide, label, "\n".join(demo_parts))
+        demo_parts = []
+        pending_demo = False
+        demo_slide = None
+
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        # A new slide header closes any open segment/demo. This also makes demos
+        # without an explicit "Fin Demo/..." tolerant to the next slide header.
+        if _SLIDE_RE.match(raw_line):
+            if pending_demo:
+                flush_demo()
+            else:
+                flush_pending()
+            current_slide = int(_SLIDE_RE.match(raw_line).group(1))
+            continue
+
+        if pending_demo:
+            if _DEMO_END_RE.match(raw_line):
+                flush_demo()
+            else:
+                demo_parts.append(raw_line)
+            continue
+
+        demo_match = _DEMO_START_RE.match(raw_line)
+        if demo_match:
+            flush_pending()
+            demo_slide = int(demo_match.group(1))
+            current_slide = demo_slide
+            first_line_content = demo_match.group(2).strip()
+            demo_parts = [first_line_content] if first_line_content else []
+            pending_demo = True
+            continue
+
+        if current_slide is None:
+            # Ignore title/material before the first recognized slide header.
+            continue
+
+        if not line:
+            flush_pending()
+            continue
+
+        segment_match = _SEGMENT_RE.match(raw_line)
+        if segment_match:
+            slide = int(segment_match.group(1))
+            sub_index = segment_match.group(2)
+            current_slide = slide
+            flush_pending()
+            pending_label = f"{slide}.{sub_index}"
+            remainder = segment_match.group(3).strip()
+            if remainder:
+                pending.append(remainder)
+            continue
+
+        pending.append(raw_line)
+
+    if pending_demo:
+        flush_demo()
+    else:
+        flush_pending()
+
+    return segments or None
+
+
+parse_script = parse_structured_script
