@@ -6,9 +6,9 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from src.script_parser import extract_script_text, parse_structured_script
-from src.transcription import ElevenLabsTranscriber
-from src.matcher import match_audios_to_script, match_audios_to_segments
+from src.script_parser import extract_script_text
+from src.transcription_local import LocalWhisperTranscriber
+from src.matcher import match_audios_to_script
 from src.utils import file_sha256
 
 
@@ -21,7 +21,6 @@ st.set_page_config(
 st.title("🎙️ Organizador de Narraciones")
 st.caption("Transcribe tus audios y los ordena automáticamente según el guion.")
 
-
 # -----------------------------
 # Session state
 # -----------------------------
@@ -29,9 +28,10 @@ for key, default in {
     "transcriptions": {},
     "matches": None,
     "script_text": "",
+    "script_units": [],
     "audio_files": {},
-    "script_segments": None,
-    "structured_mode": False,
+    "transcriber": None,
+    "transcriber_model_size": None,
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -47,20 +47,31 @@ with st.sidebar:
         ["Español", "Detectar automáticamente"],
         index=0,
     )
-    language_code = "spa" if language == "Español" else None
+    language_code = "es" if language == "Español" else None
 
     max_window = st.slider(
         "Máximo de frases por fragmento",
         min_value=3,
         max_value=15,
         value=8,
-        help="Solo aplica al modo de frases sueltas.",
+        help="Aumenta este valor si cada audio contiene fragmentos largos del guion.",
     )
 
     st.divider()
-    st.markdown(
-        "La clave de ElevenLabs debe configurarse en "
-        "`.streamlit/secrets.toml` o en Streamlit Cloud."
+    st.markdown("**Modelo de transcripción (local, sin API)**")
+    model_size = st.selectbox(
+        "Tamaño del modelo Whisper",
+        ["tiny", "base", "small", "medium"],
+        index=2,
+        help=(
+            "Modelos más grandes son más precisos pero más lentos y "
+            "requieren más memoria. En Streamlit Community Cloud (free tier) "
+            "se recomienda no pasar de 'small'."
+        ),
+    )
+    st.caption(
+        "La primera vez que uses un tamaño de modelo, se descargará "
+        "automáticamente (puede tardar un poco)."
     )
 
 
@@ -89,7 +100,7 @@ with col2:
 
 
 # -----------------------------
-# Read and classify script
+# Read script
 # -----------------------------
 if script_file:
     try:
@@ -97,27 +108,9 @@ if script_file:
             script_file.name,
             script_file.getvalue(),
         )
-        segments = parse_structured_script(script_text)
-
-        # Re-evaluate the mode every time a script is uploaded. This also avoids
-        # accidentally reusing a previous structured script after a plain TXT.
         st.session_state.script_text = script_text
-        st.session_state.script_segments = segments
-        st.session_state.structured_mode = bool(segments)
-        st.session_state.matches = None
-
+        st.session_state.script_units = None
         st.success(f"Guion cargado: {len(script_text.split())} palabras.")
-        if segments:
-            slide_count = len({s["diapositiva"] for s in segments})
-            st.caption(
-                f"📑 Guion estructurado detectado: {slide_count} diapositivas, "
-                f"{len(segments)} segmentos."
-            )
-        else:
-            st.caption(
-                "📝 Guion sin estructura de diapositivas, usando comparación por frases."
-            )
-
         with st.expander("Ver guion"):
             st.text_area(
                 "Contenido",
@@ -133,14 +126,14 @@ if script_file:
 # Store uploaded audio bytes
 # -----------------------------
 if audio_files:
-    st.session_state.audio_files.update({
+    st.session_state.audio_files = {
         file_sha256(f.getvalue()): {
             "name": f.name,
             "bytes": f.getvalue(),
             "type": f.type or "audio/mpeg",
         }
         for f in audio_files
-    })
+    }
 
     st.info(f"{len(audio_files)} archivo(s) de audio cargado(s).")
 
@@ -151,46 +144,23 @@ if audio_files:
 st.divider()
 st.subheader("🎙️ Transcripción")
 
-has_key = False
-missing_key_message = (
-    "No encuentro `ELEVENLABS_API_KEY`. Debe estar en el nivel raíz de "
-    "`.streamlit/secrets.toml` (sin secciones, por ejemplo `[elevenlabs]`) "
-    "y con ese nombre exacto, sin espacios."
-)
-try:
-    if not st.secrets:
-        missing_key_message = (
-            "No hay secretos cargados en Streamlit. Agrega "
-            "`ELEVENLABS_API_KEY` en el nivel raíz de "
-            "`.streamlit/secrets.toml` (sin secciones y sin espacios en el nombre)."
-        )
-    elif "ELEVENLABS_API_KEY" not in st.secrets:
-        missing_key_message = (
-            "Hay secretos configurados, pero falta `ELEVENLABS_API_KEY`. "
-            "Asegúrate de definirla en el nivel raíz de "
-            "`.streamlit/secrets.toml` (sin secciones) y con ese nombre exacto."
-        )
-    else:
-        key_value = st.secrets.get("ELEVENLABS_API_KEY")
-        has_key = bool(str(key_value).strip()) if key_value is not None else False
-        if not has_key:
-            missing_key_message = (
-                "`ELEVENLABS_API_KEY` existe pero está vacía. Completa su valor "
-                "en el nivel raíz de `.streamlit/secrets.toml`."
-            )
-except Exception:
-    has_key = False
-
-if not has_key:
-    st.warning(missing_key_message)
-
 if st.button(
     "🚀 Transcribir audios",
     type="primary",
-    disabled=not (has_key and audio_files),
+    disabled=not audio_files,
     use_container_width=True,
 ):
-    transcriber = ElevenLabsTranscriber(st.secrets["ELEVENLABS_API_KEY"])
+    # Reutilizamos el modelo cargado si ya se pidió ese mismo tamaño antes,
+    # para no volver a cargarlo en cada clic.
+    if (
+        st.session_state.transcriber is None
+        or st.session_state.transcriber_model_size != model_size
+    ):
+        with st.spinner(f"Cargando modelo Whisper ({model_size})..."):
+            st.session_state.transcriber = LocalWhisperTranscriber(model_size=model_size)
+            st.session_state.transcriber_model_size = model_size
+
+    transcriber = st.session_state.transcriber
 
     progress = st.progress(0)
     status = st.empty()
@@ -250,16 +220,6 @@ if st.session_state.transcriptions:
 st.divider()
 st.subheader("🧠 Organización según el guion")
 
-if st.session_state.structured_mode:
-    st.caption(
-        "Modo activo: guion estructurado. Cada audio se compara contra el texto completo "
-        "de cada segmento y se ordena por su `order_index` real."
-    )
-else:
-    st.caption(
-        "Modo activo: frases sueltas. Se conserva el matching existente por ventanas de frases."
-    )
-
 if st.button(
     "🔎 Identificar y ordenar audios",
     type="primary",
@@ -270,17 +230,11 @@ if st.button(
     use_container_width=True,
 ):
     with st.spinner("Comparando las transcripciones con el guion..."):
-        if st.session_state.structured_mode:
-            st.session_state.matches = match_audios_to_segments(
-                st.session_state.transcriptions,
-                st.session_state.script_segments,
-            )
-        else:
-            st.session_state.matches = match_audios_to_script(
-                st.session_state.transcriptions,
-                st.session_state.script_text,
-                max_window=max_window,
-            )
+        st.session_state.matches = match_audios_to_script(
+            st.session_state.transcriptions,
+            st.session_state.script_text,
+            max_window=max_window,
+        )
 
 if st.session_state.matches:
     matches = st.session_state.matches
@@ -298,36 +252,16 @@ if st.session_state.matches:
 
     display_rows = []
     for m in matches:
-        row = {
-            "Orden": m["order"],
-            "Audio": m["filename"],
-            "Confianza": f'{m["confidence"]:.0%}',
-            "Coincidencia": m["matched_text"],
-            "Transcripción": m["transcription"],
-        }
-        if st.session_state.structured_mode:
-            row["Diapositiva"] = m["diapositiva"]
-            row["Segmento"] = m["label"]
-            row = {
-                "Orden": row["Orden"],
-                "Diapositiva": row["Diapositiva"],
-                "Segmento": row["Segmento"],
-                "Audio": row["Audio"],
-                "Confianza": row["Confianza"],
-                "Coincidencia": row["Coincidencia"],
-                "Transcripción": row["Transcripción"],
+        display_rows.append(
+            {
+                "Orden": m["order"],
+                "Audio": m["filename"],
+                "Confianza": f'{m["confidence"]:.0%}',
+                "Frases": f'{m["start_sentence"] + 1}–{m["end_sentence"] + 1}',
+                "Coincidencia": m["matched_text"],
+                "Transcripción": m["transcription"],
             }
-        else:
-            row["Frases"] = f'{m["start_sentence"] + 1}–{m["end_sentence"] + 1}'
-            row = {
-                "Orden": row["Orden"],
-                "Audio": row["Audio"],
-                "Confianza": row["Confianza"],
-                "Frases": row["Frases"],
-                "Coincidencia": row["Coincidencia"],
-                "Transcripción": row["Transcripción"],
-            }
-        display_rows.append(row)
+        )
 
     df = pd.DataFrame(display_rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
@@ -335,13 +269,8 @@ if st.session_state.matches:
     st.markdown("### 🔊 Revisión")
 
     for m in matches:
-        location = (
-            f'Diapositiva {m["diapositiva"]} · {m["label"]}'
-            if st.session_state.structured_mode
-            else f'frases {m["start_sentence"] + 1}–{m["end_sentence"] + 1}'
-        )
         with st.expander(
-            f'{m["order"]:02d} · {location} · {m["filename"]} · {m["confidence"]:.0%}'
+            f'{m["order"]:02d} · {m["filename"]} · {m["confidence"]:.0%}'
         ):
             audio = st.session_state.audio_files.get(m["file_hash"])
             if audio:
@@ -353,51 +282,26 @@ if st.session_state.matches:
             st.markdown("**Fragmento del guion detectado**")
             st.info(m["matched_text"])
 
-            if st.session_state.structured_mode:
-                st.caption(
-                    f'Diapositiva {m["diapositiva"]} · segmento {m["label"]} · '
-                    f'order_index {m["order_index"]}.'
-                )
-            else:
-                st.caption(
-                    f'Posición estimada en el guion: frases '
-                    f'{m["start_sentence"] + 1}–{m["end_sentence"] + 1}.'
-                )
+            st.caption(
+                f'Posición estimada en el guion: frases '
+                f'{m["start_sentence"] + 1}–{m["end_sentence"] + 1}.'
+            )
 
-    # -----------------------------
-    # Standard exports
-    # -----------------------------
-    if st.session_state.structured_mode:
-        export_df = pd.DataFrame(
-            [
-                {
-                    "orden": m["order"],
-                    "diapositiva": m["diapositiva"],
-                    "segmento": m["label"],
-                    "order_index": m["order_index"],
-                    "archivo": m["filename"],
-                    "confianza": m["confidence"],
-                    "fragmento_guion": m["matched_text"],
-                    "transcripcion": m["transcription"],
-                }
-                for m in matches
-            ]
-        )
-    else:
-        export_df = pd.DataFrame(
-            [
-                {
-                    "orden": m["order"],
-                    "archivo": m["filename"],
-                    "confianza": m["confidence"],
-                    "frase_inicio": m["start_sentence"] + 1,
-                    "frase_fin": m["end_sentence"] + 1,
-                    "fragmento_guion": m["matched_text"],
-                    "transcripcion": m["transcription"],
-                }
-                for m in matches
-            ]
-        )
+    # Downloads
+    export_df = pd.DataFrame(
+        [
+            {
+                "orden": m["order"],
+                "archivo": m["filename"],
+                "confianza": m["confidence"],
+                "frase_inicio": m["start_sentence"] + 1,
+                "frase_fin": m["end_sentence"] + 1,
+                "fragmento_guion": m["matched_text"],
+                "transcripcion": m["transcription"],
+            }
+            for m in matches
+        ]
+    )
 
     csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
     json_bytes = json.dumps(matches, ensure_ascii=False, indent=2).encode("utf-8")
@@ -415,73 +319,16 @@ if st.session_state.matches:
         "application/json",
     )
 
-    # -----------------------------
-    # Structured annotated script
-    # -----------------------------
-    if st.session_state.structured_mode:
-        # A segment may receive more than one audio with the current MVP
-        # matcher. Keep all assignments visible instead of silently dropping one.
-        assigned: dict[int, list[dict]] = {}
-        for m in matches:
-            assigned.setdefault(m["order_index"], []).append(m)
-
-        annotated_lines = []
-        for segment in sorted(
-            st.session_state.script_segments,
-            key=lambda s: s["order_index"],
-        ):
-            segment_matches = assigned.get(segment["order_index"], [])
-            if segment_matches:
-                assignments = "; ".join(
-                    f'{m["filename"]} ({m["confidence"]:.0%})'
-                    for m in sorted(segment_matches, key=lambda x: -x["confidence"])
-                )
-                suffix = f"→ asignado: {assignments}"
-            else:
-                suffix = "→ SIN AUDIO ASIGNADO"
-
-            annotated_lines.append(
-                f'{segment["label"]}: {segment["text"]} {suffix}'
-            )
-
-        annotated_text = "\n\n".join(annotated_lines) + "\n"
-        st.download_button(
-            "📝 Descargar guion anotado",
-            annotated_text.encode("utf-8"),
-            "guion_anotado.txt",
-            "text/plain",
-        )
-
-    # -----------------------------
-    # ZIP with ordered/renamed audios
-    # -----------------------------
+    # ZIP with renamed/copy-ordered audios
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-        if st.session_state.structured_mode:
-            ordered_matches = sorted(
-                matches,
-                key=lambda x: (x["order_index"], -x["confidence"], x["filename"].lower()),
-            )
-            for m in ordered_matches:
-                audio = st.session_state.audio_files.get(m["file_hash"])
-                if not audio:
-                    continue
-
+        for m in matches:
+            audio = st.session_state.audio_files.get(m["file_hash"])
+            if audio:
                 suffix = Path(audio["name"]).suffix
-                slide = m["diapositiva"]
-                label = m["label"].replace("/", "-").replace("\\", "-")
-                archive_name = f'Diapositiva{slide}/Diapo{label}{suffix}'
+                safe_name = Path(audio["name"]).stem.replace("/", "_").replace("\\", "_")
+                archive_name = f'{m["order"]:03d}_{safe_name}{suffix}'
                 zf.writestr(archive_name, audio["bytes"])
-        else:
-            for m in matches:
-                audio = st.session_state.audio_files.get(m["file_hash"])
-                if audio:
-                    suffix = Path(audio["name"]).suffix
-                    safe_name = (
-                        Path(audio["name"]).stem.replace("/", "_").replace("\\", "_")
-                    )
-                    archive_name = f'{m["order"]:03d}_{safe_name}{suffix}'
-                    zf.writestr(archive_name, audio["bytes"])
 
     st.download_button(
         "📦 Descargar audios ordenados (ZIP)",
@@ -493,5 +340,5 @@ if st.session_state.matches:
 
 st.divider()
 st.caption(
-    "MVP: ElevenLabs Scribe v2 para transcripción + matching local contra el guion."
+    "MVP: Whisper local (faster-whisper) para transcripción + matching local contra el guion."
 )
