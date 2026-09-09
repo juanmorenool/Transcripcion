@@ -4,17 +4,17 @@ import re
 
 
 # Labels accepted by the structured-script parser. They are deliberately
-# tolerant to optional colons, spacing and the "Inicio" variant used by demos.
+# tolerant to optional colons, spacing and common demo-label variants.
 _SLIDE_RE = re.compile(r"^\s*Diapositiva\s+(\d+)\s*:?[ \t]*$", re.IGNORECASE)
 _SEGMENT_RE = re.compile(
     r"^\s*Diapo\s*(\d+)\.(\d+)\s*:\s*(.*)$", re.IGNORECASE
 )
 _DEMO_START_RE = re.compile(
-    r"^\s*(?:Inicio\s+)?Demo\s*/\s*Diapositiva\s+(\d+)\s*:?[ \t]*(.*)$",
+    r"^\s*(?:Inicio\s+)?Demo\s*(?:/|-)\s*Diapositiva\s*(\d+)\s*:?[ \t]*(.*)$",
     re.IGNORECASE,
 )
 _DEMO_END_RE = re.compile(
-    r"^\s*Fin\s+Demo\s*/\s*Diapositiva\s+(\d+)\s*\.?\s*$",
+    r"^\s*Fin\s+Demo\s*(?:/|-)\s*Diapositiva\s*(\d+)\s*\.?\s*$",
     re.IGNORECASE,
 )
 
@@ -71,9 +71,8 @@ def parse_structured_script(text: str) -> list[dict] | None:
     Parse a slide-structured script while preserving the exact global order.
 
     A segment is created for every labeled paragraph, every unlabeled paragraph
-    inside a slide, and every demo block. The parser intentionally does not
-    group demos separately: all segments share one monotonically increasing
-    order_index based solely on their appearance in the source text.
+    inside a slide, and every demo block. Demos are not handled as a separate
+    ordering phase: they receive the next global order_index at their position.
 
     Returns None when no "Diapositiva N" header is found, allowing the caller
     to keep the legacy sentence/window matching path unchanged.
@@ -84,14 +83,7 @@ def parse_structured_script(text: str) -> list[dict] | None:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     lines = text.split("\n")
 
-    # Per-line parsing lets us recognize labels even when extraction from DOCX
-    # or PDF does not preserve exactly the same paragraph boundaries.
-    slide_numbers = [
-        int(match.group(1))
-        for line in lines
-        if (match := _SLIDE_RE.match(line))
-    ]
-    if not slide_numbers:
+    if not any(_SLIDE_RE.match(line) for line in lines):
         return None
 
     segments: list[dict] = []
@@ -138,8 +130,6 @@ def parse_structured_script(text: str) -> list[dict] | None:
         nonlocal demo_parts, pending_demo, demo_slide
         if demo_slide is not None:
             demo_counter[demo_slide] = demo_counter.get(demo_slide, 0) + 1
-            # The first demo keeps the requested readable convention. A
-            # second demo on the same slide gets a suffix so labels remain unique.
             label = (
                 f"{demo_slide}-demo"
                 if demo_counter[demo_slide] == 1
@@ -153,49 +143,49 @@ def parse_structured_script(text: str) -> list[dict] | None:
     for raw_line in lines:
         line = raw_line.strip()
 
-        # A new slide header always wins over unfinished content. If a malformed
-        # demo lacks its closing marker, close it at the next slide header.
-        if match := _SLIDE_RE.match(raw_line):
+        # A new slide header closes any open segment/demo. This also makes demos
+        # without an explicit "Fin Demo/..." tolerant to the next slide header.
+        if _SLIDE_RE.match(raw_line):
             if pending_demo:
                 flush_demo()
             else:
                 flush_pending()
-            current_slide = int(match.group(1))
+            current_slide = int(_SLIDE_RE.match(raw_line).group(1))
             continue
 
         if pending_demo:
-            if match := _DEMO_END_RE.match(raw_line):
-                # Keep the demo attached to the slide declared by its opening
-                # marker. The closing number is only a terminator.
+            if _DEMO_END_RE.match(raw_line):
                 flush_demo()
             else:
                 demo_parts.append(raw_line)
             continue
 
-        if match := _DEMO_START_RE.match(raw_line):
+        demo_match = _DEMO_START_RE.match(raw_line)
+        if demo_match:
             flush_pending()
-            demo_slide = int(match.group(1))
+            demo_slide = int(demo_match.group(1))
             current_slide = demo_slide
-            first_line_content = match.group(2).strip()
+            first_line_content = demo_match.group(2).strip()
             demo_parts = [first_line_content] if first_line_content else []
             pending_demo = True
             continue
 
         if current_slide is None:
-            # Ignore title material before the first recognized slide header.
+            # Ignore title/material before the first recognized slide header.
             continue
 
         if not line:
             flush_pending()
             continue
 
-        if match := _SEGMENT_RE.match(raw_line):
-            slide = int(match.group(1))
-            sub_index = match.group(2)
+        segment_match = _SEGMENT_RE.match(raw_line)
+        if segment_match:
+            slide = int(segment_match.group(1))
+            sub_index = segment_match.group(2)
             current_slide = slide
             flush_pending()
             pending_label = f"{slide}.{sub_index}"
-            remainder = match.group(3).strip()
+            remainder = segment_match.group(3).strip()
             if remainder:
                 pending.append(remainder)
             continue
@@ -210,5 +200,4 @@ def parse_structured_script(text: str) -> list[dict] | None:
     return segments or None
 
 
-# Alias kept explicit for callers that prefer a verb matching the app flow.
 parse_script = parse_structured_script
