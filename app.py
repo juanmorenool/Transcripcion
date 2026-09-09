@@ -1,3 +1,4 @@
+```python
 import io
 import json
 import zipfile
@@ -14,11 +15,11 @@ from src.utils import file_sha256
 
 st.set_page_config(
     page_title="Organizador de Narraciones",
-    page_icon="🎙️",
+    page_icon=None,
     layout="wide",
 )
 
-st.title("🎙️ Organizador de Narraciones")
+st.title("Organizador de Narraciones")
 st.caption("Transcribe tus audios y los ordena automáticamente según el guion.")
 
 # -----------------------------
@@ -41,7 +42,7 @@ for key, default in {
 # Sidebar
 # -----------------------------
 with st.sidebar:
-    st.header("⚙️ Configuración")
+    st.header("Configuración")
     language = st.selectbox(
         "Idioma de los audios",
         ["Español", "Detectar automáticamente"],
@@ -81,7 +82,7 @@ with st.sidebar:
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("📄 1. Guion")
+    st.subheader("1. Guion")
     script_file = st.file_uploader(
         "Sube el guion",
         type=["txt", "docx", "pdf"],
@@ -90,7 +91,7 @@ with col1:
     )
 
 with col2:
-    st.subheader("🎧 2. Audios")
+    st.subheader("2. Audios")
     audio_files = st.file_uploader(
         "Sube uno o varios audios",
         type=["mp3", "wav", "m4a", "mp4", "aac", "ogg", "flac"],
@@ -142,10 +143,10 @@ if audio_files:
 # Transcription
 # -----------------------------
 st.divider()
-st.subheader("🎙️ Transcripción")
+st.subheader("Transcripción")
 
 if st.button(
-    "🚀 Transcribir audios",
+    "Transcribir audios",
     type="primary",
     disabled=not audio_files,
     use_container_width=True,
@@ -157,7 +158,9 @@ if st.button(
         or st.session_state.transcriber_model_size != model_size
     ):
         with st.spinner(f"Cargando modelo Whisper ({model_size})..."):
-            st.session_state.transcriber = LocalWhisperTranscriber(model_size=model_size)
+            st.session_state.transcriber = LocalWhisperTranscriber(
+                model_size=model_size
+            )
             st.session_state.transcriber_model_size = model_size
 
     transcriber = st.session_state.transcriber
@@ -170,17 +173,21 @@ if st.button(
         file_hash = file_sha256(uploaded.getvalue())
 
         if file_hash in st.session_state.transcriptions:
-            status.write(f"⏭️ Ya transcrito: {uploaded.name}")
+            status.write(f"Ya transcrito: {uploaded.name}")
             progress.progress(i / total)
             continue
 
-        status.write(f"🎧 Transcribiendo {uploaded.name} ({i}/{total})...")
+        status.write(
+            f"Transcribiendo {uploaded.name} ({i}/{total})..."
+        )
+
         try:
             result = transcriber.transcribe(
                 uploaded.getvalue(),
                 filename=uploaded.name,
                 language_code=language_code,
             )
+
             st.session_state.transcriptions[file_hash] = {
                 "file_hash": file_hash,
                 "filename": uploaded.name,
@@ -189,6 +196,7 @@ if st.button(
                 "language_probability": result.get("language_probability"),
                 "words": result.get("words", []),
             }
+
         except Exception as exc:
             st.error(f"Error en {uploaded.name}: {exc}")
 
@@ -202,6 +210,7 @@ if st.button(
 # -----------------------------
 if st.session_state.transcriptions:
     rows = []
+
     for item in st.session_state.transcriptions.values():
         rows.append(
             {
@@ -211,17 +220,22 @@ if st.session_state.transcriptions:
                 "Transcripción": item["text"],
             }
         )
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.dataframe(
+        pd.DataFrame(rows),
+        use_container_width=True,
+        hide_index=True,
+    )
 
 
 # -----------------------------
 # Matching
 # -----------------------------
 st.divider()
-st.subheader("🧠 Organización según el guion")
+st.subheader("Organización según el guion")
 
 if st.button(
-    "🔎 Identificar y ordenar audios",
+    "Identificar y ordenar audios",
     type="primary",
     disabled=not (
         bool(st.session_state.script_text)
@@ -236,45 +250,70 @@ if st.button(
             max_window=max_window,
         )
 
+
 if st.session_state.matches:
     matches = st.session_state.matches
 
     high = sum(m["confidence"] >= 0.85 for m in matches)
-    medium = sum(0.65 <= m["confidence"] < 0.85 for m in matches)
-    low = sum(m["confidence"] < 0.65 for m in matches)
+    medium = sum(
+        0.65 <= m["confidence"] < 0.85
+        for m in matches
+    )
+    low = sum(
+        m["confidence"] < 0.65
+        for m in matches
+    )
 
     a, b, c = st.columns(3)
-    a.metric("🟢 Alta confianza", high)
-    b.metric("🟡 Revisar", medium)
-    c.metric("🔴 Baja", low)
+
+    a.metric("Alta confianza", high)
+    b.metric("Revisar", medium)
+    c.metric("Baja", low)
 
     st.markdown("### Resultado")
 
     display_rows = []
+
     for m in matches:
         display_rows.append(
             {
                 "Orden": m["order"],
                 "Audio": m["filename"],
                 "Confianza": f'{m["confidence"]:.0%}',
-                "Frases": f'{m["start_sentence"] + 1}–{m["end_sentence"] + 1}',
+                "Frases": (
+                    f'{m["start_sentence"] + 1}–'
+                    f'{m["end_sentence"] + 1}'
+                ),
                 "Coincidencia": m["matched_text"],
                 "Transcripción": m["transcription"],
             }
         )
 
     df = pd.DataFrame(display_rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
 
-    st.markdown("### 🔊 Revisión")
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("### Revisión")
 
     for m in matches:
         with st.expander(
-            f'{m["order"]:02d} · {m["filename"]} · {m["confidence"]:.0%}'
+            f'{m["order"]:02d} · '
+            f'{m["filename"]} · '
+            f'{m["confidence"]:.0%}'
         ):
-            audio = st.session_state.audio_files.get(m["file_hash"])
+            audio = st.session_state.audio_files.get(
+                m["file_hash"]
+            )
+
             if audio:
-                st.audio(audio["bytes"], format=audio["type"])
+                st.audio(
+                    audio["bytes"],
+                    format=audio["type"],
+                )
 
             st.markdown("**Transcripción**")
             st.write(m["transcription"])
@@ -284,7 +323,8 @@ if st.session_state.matches:
 
             st.caption(
                 f'Posición estimada en el guion: frases '
-                f'{m["start_sentence"] + 1}–{m["end_sentence"] + 1}.'
+                f'{m["start_sentence"] + 1}–'
+                f'{m["end_sentence"] + 1}.'
             )
 
     # Downloads
@@ -303,17 +343,25 @@ if st.session_state.matches:
         ]
     )
 
-    csv_bytes = export_df.to_csv(index=False).encode("utf-8-sig")
-    json_bytes = json.dumps(matches, ensure_ascii=False, indent=2).encode("utf-8")
+    csv_bytes = export_df.to_csv(
+        index=False
+    ).encode("utf-8-sig")
+
+    json_bytes = json.dumps(
+        matches,
+        ensure_ascii=False,
+        indent=2,
+    ).encode("utf-8")
 
     st.download_button(
-        "⬇️ Descargar resultados CSV",
+        "Descargar resultados CSV",
         csv_bytes,
         "resultado_narraciones.csv",
         "text/csv",
     )
+
     st.download_button(
-        "⬇️ Descargar resultados JSON",
+        "Descargar resultados JSON",
         json_bytes,
         "resultado_narraciones.json",
         "application/json",
@@ -321,17 +369,41 @@ if st.session_state.matches:
 
     # ZIP with renamed/copy-ordered audios
     zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+
+    with zipfile.ZipFile(
+        zip_buffer,
+        "w",
+        zipfile.ZIP_DEFLATED,
+    ) as zf:
+
         for m in matches:
-            audio = st.session_state.audio_files.get(m["file_hash"])
+            audio = st.session_state.audio_files.get(
+                m["file_hash"]
+            )
+
             if audio:
                 suffix = Path(audio["name"]).suffix
-                safe_name = Path(audio["name"]).stem.replace("/", "_").replace("\\", "_")
-                archive_name = f'{m["order"]:03d}_{safe_name}{suffix}'
-                zf.writestr(archive_name, audio["bytes"])
+
+                safe_name = (
+                    Path(audio["name"])
+                    .stem
+                    .replace("/", "_")
+                    .replace("\\", "_")
+                )
+
+                archive_name = (
+                    f'{m["order"]:03d}_'
+                    f'{safe_name}'
+                    f'{suffix}'
+                )
+
+                zf.writestr(
+                    archive_name,
+                    audio["bytes"],
+                )
 
     st.download_button(
-        "📦 Descargar audios ordenados (ZIP)",
+        "Descargar audios ordenados (ZIP)",
         zip_buffer.getvalue(),
         "audios_ordenados.zip",
         "application/zip",
@@ -339,6 +411,9 @@ if st.session_state.matches:
 
 
 st.divider()
+
 st.caption(
-    "MVP: Whisper local (faster-whisper) para transcripción + matching local contra el guion."
+    "MVP: Whisper local (faster-whisper) para transcripción "
+    "+ matching local contra el guion."
 )
+```
