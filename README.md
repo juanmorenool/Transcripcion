@@ -1,4 +1,4 @@
-# 🎙️ Organizador de Narraciones
+#  Organizador de Narraciones
 
 Aplicación Streamlit para:
 
@@ -11,7 +11,7 @@ Aplicación Streamlit para:
 7. Revisar manualmente los resultados.
 8. Descargar un CSV/JSON y un ZIP con los audios ordenados.
 
-## 🔐 API de ElevenLabs — configuración segura
+##  API de ElevenLabs — configuración segura
 
 **La API key NO está incluida en este repositorio.** Esto es intencional: Streamlit recomienda mantener los secretos fuera del repositorio y Community Cloud permite configurarlos como Secrets. ElevenLabs también indica que las API keys deben tratarse como secretos.
 
